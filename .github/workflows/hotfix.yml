@@ -1,0 +1,99 @@
+name: Release Fix
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release version'
+        required: true
+        type: string
+
+env:
+  IMAGE_NAME: cr.yandex/${{ vars.REGISTRY_ID }}/app
+  VERSION: ${{ github.event.inputs.release_version }}
+  FIX: ${{ github.run_number }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run linter
+        run: |
+          npm ci
+          npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: |
+          npm ci
+          npm test
+
+  release-fix:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: releases/${{ github.event.inputs.release_version }}
+          fetch-depth: 0
+
+      - name: Login to Yandex Container Registry
+        run: docker login -u oauth -p ${{ secrets.YC_OAUTH_TOKEN }} cr.yandex
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_fix${{ env.FIX }} .
+          docker tag ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_fix${{ env.FIX }} ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_latest
+
+      - name: Push Docker images
+        run: |
+          docker push ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_fix${{ env.FIX }}
+          docker push ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_latest
+
+      - name: Create and push fix tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag ${{ env.VERSION }}_fix${{ env.FIX }}
+          git push origin ${{ env.VERSION }}_fix${{ env.FIX }}
+
+      - name: Get previous tag and commits
+        id: changelog
+        run: |
+          git fetch --tags
+          TAG=$(git tag --sort=-creatordate | grep -E '^[0-9]+$' | sed -n 2p)
+          echo "PREV_TAG=$TAG" >> $GITHUB_OUTPUT
+          if [ -z "$TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" releases/${{ env.VERSION }})
+          else
+            COMMITS=$(git log $TAG..releases/${{ env.VERSION }} --pretty=format:"- %s (%h)")
+          fi
+          echo "commits<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Find release issue number
+        id: issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER=$(gh issue list --state open --search "Release ${{ env.VERSION }}" --json number --jq '.[0].number')
+          echo "ISSUE_NUMBER=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+      - name: Add comment to release issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment ${{ steps.issue.outputs.ISSUE_NUMBER }} \
+            --body "fix date: $(date '+%Y-%m-%d %H:%M:%S')
+          fix author: ${{ github.actor }}
+          commit list:
+          ${{ steps.changelog.outputs.commits }}
+
+          docker image: ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_fix${{ env.FIX }}
+          "

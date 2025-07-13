@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: cr.yandex/${{ vars.REGISTRY_ID }}/app
+  VERSION: ${{ github.run_number }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run linter
+        run: |
+          npm ci
+          npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: |
+          npm ci
+          npm test
+
+  release:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git checkout -b releases/${{ env.VERSION }}
+          git push origin releases/${{ env.VERSION }}
+
+      - name: Login to Yandex Container Registry
+        run: docker login -u oauth -p ${{ secrets.YC_OAUTH_TOKEN }} cr.yandex
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ env.VERSION }} .
+          docker tag ${{ env.IMAGE_NAME }}:${{ env.VERSION }} ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_latest
+
+      - name: Push Docker images
+        run: |
+          docker push ${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+          docker push ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_latest
+
+      - name: Create and push version tag
+        run: |
+          git tag ${{ env.VERSION }}
+          git push origin ${{ env.VERSION }}
+
+      - name: Get previous tag and commits
+        id: changelog
+        run: |
+          git fetch --tags
+          TAG=$(git tag --sort=-creatordate | grep -E '^[0-9]+$' | sed -n 2p)
+          echo "PREV_TAG=$TAG" >> $GITHUB_OUTPUT
+          if [ -z "$TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" main)
+          else
+            COMMITS=$(git log $TAG..main --pretty=format:"- %s (%h)")
+          fi
+          echo "commits<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Release ${{ env.VERSION }}" \
+            --body "date: $(date '+%Y-%m-%d %H:%M:%S')
+          release author: ${{ github.actor }}
+          version number: ${{ env.VERSION }}
+
+          commit list:
+          ${{ steps.changelog.outputs.commits }}
+
+          docker image: ${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+          " \
+            --repo ${{ github.repository }}
+
+      - name: Update CHANGELOG.md
+        run: |
+          git checkout releases/${{ env.VERSION }}
+
+          DATE=$(date '+%Y-%m-%d %H:%M:%S')
+          HEADER="## ${{ env.VERSION }} — $DATE"
+          COMMITS="${{ steps.changelog.outputs.commits }}"
+
+          echo -e "$HEADER\n$COMMITS\n" | cat - CHANGELOG.md > CHANGELOG.tmp
+          mv CHANGELOG.tmp CHANGELOG.md
+
+          git add CHANGELOG.md
+          git commit -m "update CHANGELOG.md for release ${{ env.VERSION }}"
+          git push origin releases/${{ env.VERSION }}

@@ -1,0 +1,48 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release version'
+        required: true
+        type: string
+
+env:
+  VERSION: ${{ github.event.inputs.release_version }}
+  IMAGE_NAME: cr.yandex/${{ vars.REGISTRY_ID }}/app
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to prod
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            docker login -u oauth -p ${{ secrets.YC_OAUTH_TOKEN }} cr.yandex
+            docker pull ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_latest
+            docker stop app || true
+            docker rm app || true
+            docker run -d --name app -p 80:3000 ${{ env.IMAGE_NAME }}:${{ env.VERSION }}_latest
+
+      - name: Find release issue number
+        id: issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER=$(gh issue list --state open --search "Release $VERSION" --json number --jq '.[0].number')
+          echo "ISSUE_NUMBER=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+      - name: Add comment to release issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment ${{ steps.issue.outputs.ISSUE_NUMBER }} \
+            --body "deployed to production: $(date '+%Y-%m-%d %H:%M:%S')
+          author: ${{ github.actor }}"
