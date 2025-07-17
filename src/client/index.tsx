@@ -7,6 +7,7 @@ import { Application } from './Application';
 import { ExampleApi, CartApi } from './api';
 import { initStore } from './store';
 
+
 import 'bootstrap/dist/css/bootstrap.min.css';
 import './index.css';
 
